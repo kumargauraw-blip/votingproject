@@ -76,6 +76,21 @@ const App: React.FC = () => {
     syncState({ ...state, projects: [...state.projects, newProject] });
   };
 
+  const deleteProject = (projectId: string) => {
+    if (confirm("Are you sure you want to delete this project? All associated votes will also be removed.")) {
+      const newProjects = state.projects.filter(p => p.id !== projectId);
+      const newVotes = state.votes.filter(v => v.projectId !== projectId);
+      const newActiveId = state.activeProjectId === projectId ? null : state.activeProjectId;
+      
+      syncState({
+        ...state,
+        projects: newProjects,
+        votes: newVotes,
+        activeProjectId: newActiveId
+      });
+    }
+  };
+
   const runVoting = (projectId: string) => {
     syncState({ ...state, activeProjectId: projectId, isWinnerAnnounced: false });
   };
@@ -218,6 +233,7 @@ const App: React.FC = () => {
             <AdminView 
               state={state} 
               addProject={addProject} 
+              deleteProject={deleteProject}
               runVoting={runVoting} 
               announceWinners={announceWinners} 
               resetAll={resetAll}

@@ -6,12 +6,13 @@ import { Plus, Play, CheckCircle, Trophy, Trash2, Users } from 'lucide-react';
 interface AdminViewProps {
   state: AppState;
   addProject: (presenter: string, project: string) => void;
+  deleteProject: (id: string) => void;
   runVoting: (id: string) => void;
   announceWinners: () => void;
   resetAll: () => void;
 }
 
-const AdminView: React.FC<AdminViewProps> = ({ state, addProject, runVoting, announceWinners, resetAll }) => {
+const AdminView: React.FC<AdminViewProps> = ({ state, addProject, deleteProject, runVoting, announceWinners, resetAll }) => {
   const [presenterName, setPresenterName] = useState('');
   const [projectName, setProjectName] = useState('');
 
@@ -116,8 +117,8 @@ const AdminView: React.FC<AdminViewProps> = ({ state, addProject, runVoting, ann
                   <p className="text-slate-500 text-sm font-medium">Presenter: {project.presenterName}</p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-6">
-                  <div className="flex items-center gap-4 text-slate-600">
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-4 text-slate-600 mr-2">
                     <div className="flex flex-col items-center">
                       <span className="text-xs uppercase text-slate-400 font-bold">Votes</span>
                       <div className="flex items-center gap-1 font-bold text-slate-800">
@@ -137,6 +138,14 @@ const AdminView: React.FC<AdminViewProps> = ({ state, addProject, runVoting, ann
                   >
                     {isActive ? <CheckCircle size={18} /> : <Play size={18} />}
                     {isActive ? 'Voting In Progress' : 'Run Voting'}
+                  </button>
+
+                  <button
+                    onClick={() => deleteProject(project.id)}
+                    className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                    title="Delete Project"
+                  >
+                    <Trash2 size={20} />
                   </button>
                 </div>
               </div>
