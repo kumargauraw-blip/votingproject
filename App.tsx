@@ -4,7 +4,7 @@ import { Project, Vote, AppState, ViewMode } from './types';
 import AdminView from './components/AdminView';
 import AudienceView from './components/AudienceView';
 import WinnersView from './components/WinnersView';
-import { Settings, Trophy, Vote as VoteIcon, Lock, LogIn, Globe, Copy, Check } from 'lucide-react';
+import { Settings, Trophy, Vote as VoteIcon, Lock, LogIn, Globe, Copy, Check, Hash, ArrowRight } from 'lucide-react';
 import mqtt from 'mqtt';
 
 const STORAGE_KEY = 'livevote_state';
@@ -16,7 +16,6 @@ const MQTT_BROKER = 'wss://broker.emqx.io:8084/mqtt';
 
 const App: React.FC = () => {
   const [view, setView] = useState<ViewMode>(() => {
-    // If URL has a room, default to VOTING
     const params = new URLSearchParams(window.location.search);
     return params.has('room') ? 'VOTING' : 'HOME';
   });
@@ -25,10 +24,10 @@ const App: React.FC = () => {
     return sessionStorage.getItem(AUTH_KEY) === 'true';
   });
 
-  const [roomId] = useState<string>(() => {
+  const [roomId, setRoomId] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
     const urlRoom = params.get('room');
-    if (urlRoom) return urlRoom;
+    if (urlRoom) return urlRoom.toUpperCase();
     
     const saved = localStorage.getItem(ROOM_ID_KEY);
     if (saved) return saved;
@@ -50,6 +49,7 @@ const App: React.FC = () => {
 
   const [isConnected, setIsConnected] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [joinCode, setJoinCode] = useState('');
   const mqttClientRef = useRef<mqtt.MqttClient | null>(null);
 
   // Sync state to local and remote
@@ -57,20 +57,16 @@ const App: React.FC = () => {
     setState(newState);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(newState));
     
-    // Only broadcast if the update originated locally (Admin actions)
     if (!isRemoteUpdate && mqttClientRef.current?.connected) {
       const topic = `livevote/${roomId}/state`;
       mqttClientRef.current.publish(topic, JSON.stringify(newState), { retain: true, qos: 1 });
     }
   }, [roomId]);
 
-  // Handle incoming votes from participants
   const handleRemoteVote = useCallback((vote: Vote) => {
     setState(prev => {
-      // Avoid duplicate votes from same user for same project
       const exists = prev.votes.some(v => v.voterName === vote.voterName && v.projectId === vote.projectId);
       if (exists) return prev;
-      
       const newState = { ...prev, votes: [...prev.votes, vote] };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(newState));
       return newState;
@@ -83,30 +79,37 @@ const App: React.FC = () => {
 
     client.on('connect', () => {
       setIsConnected(true);
-      // Subscribe to state updates (for participants)
       client.subscribe(`livevote/${roomId}/state`);
-      // Subscribe to vote stream (for admin)
       client.subscribe(`livevote/${roomId}/votes`);
+      client.subscribe(`livevote/${roomId}/sync_request`);
+      
+      // If we are a participant joining, ask for the current state
+      if (!isLoggedIn) {
+        client.publish(`livevote/${roomId}/sync_request`, JSON.stringify({ type: 'PING' }));
+      }
     });
 
     client.on('message', (topic, message) => {
       try {
         const data = JSON.parse(message.toString());
         if (topic === `livevote/${roomId}/state`) {
-          // If we are a participant or just joining, take the host's state
-          // Note: In a more complex app we'd resolve conflicts, but here Admin is master.
           if (!isLoggedIn) {
             setState(data);
             localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
           }
         } else if (topic === `livevote/${roomId}/votes`) {
-          // If we are the admin, record the vote
           if (isLoggedIn) {
             handleRemoteVote(data);
           }
+        } else if (topic === `livevote/${roomId}/sync_request`) {
+          // If admin receives a sync request, broadcast state so new person sees it
+          if (isLoggedIn) {
+            const current = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+            client.publish(`livevote/${roomId}/state`, JSON.stringify(current), { retain: true, qos: 1 });
+          }
         }
       } catch (e) {
-        console.error("Failed to parse MQTT message", e);
+        console.error("MQTT Error", e);
       }
     });
 
@@ -117,16 +120,29 @@ const App: React.FC = () => {
     };
   }, [roomId, isLoggedIn, handleRemoteVote]);
 
+  const handleJoinRoom = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (joinCode.length >= 4) {
+      const newRoom = joinCode.toUpperCase();
+      setRoomId(newRoom);
+      localStorage.setItem(ROOM_ID_KEY, newRoom);
+      // Update URL without refreshing
+      const newUrl = `${window.location.origin}${window.location.pathname}?room=${newRoom}`;
+      window.history.pushState({ path: newUrl }, '', newUrl);
+      setView('VOTING');
+      setJoinCode('');
+    }
+  };
+
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     if (loginForm.username === 'Kumar' && loginForm.password === 'voting123') {
       setIsLoggedIn(true);
       sessionStorage.setItem(AUTH_KEY, 'true');
       setLoginError('');
-      // Force a broadcast of current state as soon as admin logs in
       syncState(state);
     } else {
-      setLoginError('Invalid username or password');
+      setLoginError('Invalid credentials');
     }
   };
 
@@ -144,7 +160,7 @@ const App: React.FC = () => {
   };
 
   const deleteProject = (projectId: string) => {
-    if (confirm("Delete this project and its votes?")) {
+    if (confirm("Delete this project?")) {
       const newProjects = state.projects.filter(p => p.id !== projectId);
       const newVotes = state.votes.filter(v => v.projectId !== projectId);
       const newActiveId = state.activeProjectId === projectId ? null : state.activeProjectId;
@@ -157,11 +173,9 @@ const App: React.FC = () => {
   };
 
   const submitVote = (vote: Vote) => {
-    // If connected, send to cloud so Admin receives it
     if (mqttClientRef.current?.connected) {
       mqttClientRef.current.publish(`livevote/${roomId}/votes`, JSON.stringify(vote), { qos: 1 });
     }
-    // Also update local state for immediate UI feedback
     const newState = { ...state, votes: [...state.votes, vote] };
     setState(newState);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(newState));
@@ -188,8 +202,8 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
-      <header className="glass sticky top-0 z-50 border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
+      <header className="glass sticky top-0 z-50 border-b border-slate-200 px-4 md:px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('HOME')}>
           <div className="bg-indigo-600 p-2 rounded-lg text-white">
             <Trophy size={20} />
@@ -201,21 +215,21 @@ const App: React.FC = () => {
             <div className="flex items-center gap-1.5 mt-1">
               <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
-                {isConnected ? 'Cloud Connected' : 'Offline'} • ROOM {roomId}
+                {isConnected ? `Room ${roomId}` : 'Connecting...'}
               </span>
             </div>
           </div>
         </div>
-        <nav className="flex items-center gap-2">
+        <nav className="flex items-center gap-1 md:gap-2">
           <button 
             onClick={() => setView('ADMIN')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${view === 'ADMIN' ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-100'}`}
+            className={`flex items-center gap-2 px-2 md:px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${view === 'ADMIN' ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-100'}`}
           >
             <Settings size={16} /> <span className="hidden sm:inline">Admin</span>
           </button>
           <button 
             onClick={() => setView('VOTING')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${view === 'VOTING' ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-100'}`}
+            className={`flex items-center gap-2 px-2 md:px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${view === 'VOTING' ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-100'}`}
           >
             <VoteIcon size={16} /> <span className="hidden sm:inline">Vote</span>
           </button>
@@ -230,46 +244,65 @@ const App: React.FC = () => {
                 <Globe size={20} />
               </div>
               <div>
-                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Share with Audience</p>
-                <p className="text-sm font-medium text-slate-700">Room: <span className="font-bold text-indigo-600">{roomId}</span></p>
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Live Audience Link</p>
+                <p className="text-sm font-medium text-slate-700">Invite Code: <span className="font-bold text-indigo-600">{roomId}</span></p>
               </div>
             </div>
             <button 
               onClick={copyInviteLink}
-              className="w-full sm:w-auto flex items-center justify-center gap-2 bg-slate-900 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-slate-800 transition-all active:scale-95"
+              className="w-full sm:w-auto flex items-center justify-center gap-2 bg-indigo-600 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-indigo-700 transition-all active:scale-95 shadow-lg shadow-indigo-100"
             >
               {copySuccess ? <Check size={16} /> : <Copy size={16} />}
-              {copySuccess ? 'Copied!' : 'Copy Invite Link'}
+              {copySuccess ? 'Copied URL!' : 'Copy Invite Link'}
             </button>
           </div>
         )}
 
         {view === 'HOME' && (
-          <div className="flex flex-col items-center justify-center py-12 md:py-20 text-center animate-fadeIn">
-            <h2 className="text-3xl md:text-4xl font-extrabold text-slate-900 mb-4 px-4">Ready for Real-time Voting?</h2>
-            <p className="text-base md:text-lg text-slate-600 max-w-2xl mb-12 px-6">
-              Connect your devices instantly via the cloud. Share your Room ID and watch votes come in live as presentations happen.
-            </p>
+          <div className="flex flex-col items-center justify-center py-8 md:py-16 text-center animate-fadeIn">
+            <h2 className="text-3xl md:text-5xl font-black text-slate-900 mb-6 px-4 leading-tight">
+              Presentation <span className="text-indigo-600">Live Rating</span>
+            </h2>
+            
+            <div className="w-full max-w-md bg-white p-6 rounded-3xl shadow-xl border border-slate-200 mb-12">
+              <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">Join an Existing Session</h3>
+              <form onSubmit={handleJoinRoom} className="flex flex-col gap-3">
+                <div className="relative">
+                  <Hash className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={20} />
+                  <input 
+                    type="text" 
+                    placeholder="Enter Room Code (e.g. AB12CD)" 
+                    value={joinCode}
+                    onChange={(e) => setJoinCode(e.target.value)}
+                    className="w-full pl-12 pr-4 py-4 rounded-2xl border-2 border-slate-100 focus:border-indigo-500 outline-none font-bold text-lg tracking-widest"
+                  />
+                </div>
+                <button type="submit" className="w-full bg-slate-900 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
+                  Join Room <ArrowRight size={18} />
+                </button>
+              </form>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-3xl px-4">
               <button 
                 onClick={() => setView('ADMIN')}
                 className="group p-6 md:p-8 rounded-2xl bg-white border border-slate-200 shadow-sm hover:shadow-md hover:border-indigo-300 transition-all text-left"
               >
-                <div className="bg-indigo-100 text-indigo-600 w-12 h-12 rounded-xl flex items-center justify-center mb-4">
+                <div className="bg-indigo-50 text-indigo-600 w-12 h-12 rounded-xl flex items-center justify-center mb-4 group-hover:bg-indigo-600 group-hover:text-white transition-all">
                   <Settings size={24} />
                 </div>
-                <h3 className="text-xl font-bold text-slate-900 mb-2">Organizer</h3>
-                <p className="text-slate-500 text-sm">Host the session and manage the presentation queue.</p>
+                <h3 className="text-xl font-bold text-slate-900 mb-2">Host Dashboard</h3>
+                <p className="text-slate-500 text-sm">Create projects and manage the live voting flow.</p>
               </button>
               <button 
                 onClick={() => setView('VOTING')}
                 className="group p-6 md:p-8 rounded-2xl bg-white border border-slate-200 shadow-sm hover:shadow-md hover:border-violet-300 transition-all text-left"
               >
-                <div className="bg-violet-100 text-violet-600 w-12 h-12 rounded-xl flex items-center justify-center mb-4">
+                <div className="bg-violet-50 text-violet-600 w-12 h-12 rounded-xl flex items-center justify-center mb-4 group-hover:bg-violet-600 group-hover:text-white transition-all">
                   <VoteIcon size={24} />
                 </div>
-                <h3 className="text-xl font-bold text-slate-900 mb-2">Audience</h3>
-                <p className="text-slate-500 text-sm">Join a session and rate live presentations.</p>
+                <h3 className="text-xl font-bold text-slate-900 mb-2">Audience Portal</h3>
+                <p className="text-slate-500 text-sm">Join the room automatically and cast your votes.</p>
               </button>
             </div>
           </div>
@@ -282,7 +315,7 @@ const App: React.FC = () => {
                 <div className="bg-indigo-100 text-indigo-600 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-6">
                   <Lock size={32} />
                 </div>
-                <h2 className="text-2xl font-bold text-slate-900 mb-2 text-center">Admin Access</h2>
+                <h2 className="text-2xl font-bold text-slate-900 mb-2 text-center">Organizer Login</h2>
                 <form onSubmit={handleLogin} className="space-y-4">
                   <input
                     type="text"
@@ -301,8 +334,8 @@ const App: React.FC = () => {
                     required
                   />
                   {loginError && <p className="text-red-500 text-sm text-center font-medium">{loginError}</p>}
-                  <button type="submit" className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all">
-                    Login
+                  <button type="submit" className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold text-lg hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100">
+                    Access Dashboard
                   </button>
                 </form>
               </div>
@@ -324,7 +357,7 @@ const App: React.FC = () => {
       </main>
 
       <footer className="py-8 border-t border-slate-200 text-center text-slate-400 text-sm">
-        &copy; {new Date().getFullYear()} LiveVote Cloud. Connected to Room {roomId}.
+        &copy; {new Date().getFullYear()} LiveVote Cloud • Room: <span className="font-bold">{roomId}</span>
       </footer>
     </div>
   );
