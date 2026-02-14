@@ -1,0 +1,5 @@
+{
+  "name": "LiveVote - Presentation Rating System",
+  "description": "A real-time presentation voting platform for Zoom events, allowing audiences to rate projects across three key criteria: presentation skills, product quality, and AI creativity.",
+  "requestFramePermissions": []
+}
